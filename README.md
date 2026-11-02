@@ -1,26 +1,26 @@
-# Unified LLM Service (Pydantic-AI with Groq & Gemini Fallback)
+# Unified LLM Service (Pydantic-AI with Groq & Gemini Fallbacks)
 
-A lightweight FastAPI service providing a unified interface for interacting with Large Language Models via **Pydantic-AI**.
+A lightweight FastAPI service providing unified, curl-friendly endpoints for interacting with Large Language Models via **Pydantic-AI**.
 
-It routes prompts to **Groq API** first (primary) and automatically falls back to **Gemini API** if Groq encounters any rate limit, downtime, or runtime errors. Exposes curl-friendly `/ping` and `/prompt` endpoints requiring no headers, auth tokens, or JSON ceremony.
-
----
-
-## Features
-
-- **Unified Model Interaction**: Built on top of `pydantic-ai` using `FallbackModel`.
-- **Primary + Fallback Strategy**:
-  - Primary: **Groq** (`llama-3.3-70b-versatile` by default)
-  - Fallback: **Gemini** (`gemini-2.5-flash` by default)
-  - Automatic failover on API rate limits (429), timeouts, service errors (5xx), or connection failures.
-- **Curl Friendly**: Send plain text directly with `curl -d "prompt"`. No `Content-Type` headers or auth headers required.
-- **FastAPI Endpoints**:
-  - `GET /ping`: Instant health check (`pong`).
-  - `POST /prompt`: Takes plain text body and returns clean text response.
+It features an automatic **3-tier fallback chain** on `/prompt`, plus dedicated single-model endpoints. All routes require no headers, no auth tokens, and no JSON wrapping: just pass your prompt text in the body and get the model's text response.
 
 ---
 
-## Architecture Flow
+## Route Overview
+
+| Endpoint | Provider | Model | Description |
+|---|---|---|---|
+| `/ping` | Internal | N/A | Health check; returns `pong\n` |
+| `/prompt` | Groq $\rightarrow$ Gemini $\rightarrow$ Gemini Lite | `llama-3.3-70b-versatile` $\rightarrow$ `gemini-3.5-flash` $\rightarrow$ `gemini-3.5-flash-lite` | **3-tier fallback**: Groq primary, Gemini Flash 1st fallback, Gemini Flash Lite 2nd fallback |
+| `/qwen` | Groq API | `qwen/qwen3.8-27b` | Dedicated Qwen 3.8 27B model |
+| `/gemini-lite` | Gemini API | `gemini-3.5-flash-lite` | Dedicated Gemini 3.5 Flash Lite model |
+| `/gemini` | Gemini API | `gemini-3.5-flash` | Dedicated Gemini 3.5 Flash model |
+| `/gpt` | Groq API | `openai/gpt-oss-120b` | Dedicated GPT-OSS 120B model |
+| `/gemma` | Gemini API | `gemma-4-31b-it` | Dedicated Gemma 4 31B IT model |
+
+---
+
+## Architecture Flow (`/prompt`)
 
 ```
                       +-------------------+
@@ -39,21 +39,30 @@ It routes prompts to **Groq API** first (primary) and automatically falls back t
                       |  (Pydantic-AI)    |
                       +---------+---------+
                                 |
-                   +------------+------------+
-                   |                         |
-            (1. Try First)             (2. On Error)
-                   v                         v
-          +-----------------+       +-----------------+
-          |    Groq API     |       |   Gemini API    |
-          | (Llama-3.3-70b) | ----> | (Gemini-2.5-Fl) |
-          +-----------------+ (Fail)+-----------------+
-                   |                         |
-                   +------------+------------+
-                                | (Success)
-                                v
-                      +-------------------+
-                      | Plain Text Return |
-                      +-------------------+
+             +------------------+------------------+
+             | (1. Try First)                      |
+             v                                     |
+    +-----------------+                            |
+    |    Groq API     |                            |
+    | (Llama-3.3-70b) | ----(On Failure)----+      |
+    +-----------------+                     |      |
+             |                              v      |
+             |                     +-----------------+
+             |                     |   Gemini API    |
+             |                     | (Gemini-3.5-Fl) | ----(On Failure)----+
+             |                     +-----------------+                     |
+             |                              |                              v
+             |                              |                     +-----------------+
+             |                              |                     |   Gemini API    |
+             |                              |                     | (Gemini-3.5-Lite|
+             |                              |                     +-----------------+
+             |                              |                              |
+             +------------------------------+------------------------------+
+                                            | (Success)
+                                            v
+                                  +-------------------+
+                                  | Plain Text Return |
+                                  +-------------------+
 ```
 
 ---
@@ -97,6 +106,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 ## Curl Usage Examples
 
+No headers or auth tokens required.
+
 ### 1. Health Check (`/ping`)
 
 ```bash
@@ -109,68 +120,70 @@ pong
 
 ---
 
-### 2. Prompt LLM (`/prompt`)
+### 2. Multi-Tier Fallback (`/prompt`)
 
-No headers or auth needed. Just pass your prompt in the body:
+Automatically attempts Groq first, then Gemini 3.5 Flash, and finally Gemini 3.5 Flash Lite if earlier models fail:
 
 ```bash
-curl -d "Why is the ocean salty?" http://localhost:8000/prompt
+curl -d "Why is the sky blue?" http://localhost:8000/prompt
 ```
 
-#### Multiline prompts:
+---
+
+### 3. Dedicated Model Routes
+
+#### Qwen (`qwen/qwen3.8-27b` via Groq)
 ```bash
-curl --data-binary "Compare Python and Rust in three bullet points." http://localhost:8000/prompt
+curl -d "Write a quicksort in Python" http://localhost:8000/qwen
 ```
 
-#### From a text file:
+#### Gemini 3.5 Flash Lite (`gemini-3.5-flash-lite` via Gemini)
 ```bash
+curl -d "Summarize the history of Unix in 2 sentences" http://localhost:8000/gemini-lite
+```
+
+#### Gemini 3.5 Flash (`gemini-3.5-flash` via Gemini)
+```bash
+curl -d "Explain relativity to a 10 year old" http://localhost:8000/gemini
+```
+
+#### GPT-OSS 120B (`openai/gpt-oss-120b` via Groq)
+```bash
+curl -d "Compare C++ and Rust memory models" http://localhost:8000/gpt
+```
+
+#### Gemma 4 31B IT (`gemma-4-31b-it` via Gemini)
+```bash
+curl -d "Draft a haiku about programming" http://localhost:8000/gemma
+```
+
+---
+
+### 4. Multiline & File Payloads
+
+```bash
+# Multiline text
+curl --data-binary "Compare Python and Rust in 3 bullet points." http://localhost:8000/prompt
+
+# From file
 curl --data-binary @prompt.txt http://localhost:8000/prompt
-```
-
-#### Also supports JSON or Query params if desired:
-```bash
-# JSON
-curl -d '{"prompt": "Hello world"}' http://localhost:8000/prompt
-
-# Query parameter
-curl "http://localhost:8000/prompt?text=What+is+2%2B2"
 ```
 
 ---
 
 ## Running Tests
 
-Run the complete automated test suite:
+Run the automated test suite:
 
 ```bash
 python -m pytest -v
 ```
 
-All 14 unit and integration tests verify:
-- Primary Groq invocation
-- Automatic Gemini fallback when Groq fails
-- Error aggregation when all providers fail
-- Curl request formats (`application/x-www-form-urlencoded`, raw multiline binary, JSON, query params)
-- Empty body validation (400) and configuration errors (502)
-
----
-
-## Project Structure
-
-```
-.
-├── .env.example         # Sample environment configuration
-├── pytest.ini           # Pytest async configuration
-├── requirements.txt     # Python dependencies
-├── main.py              # Server bootstrap entry point
-├── README.md            # Documentation and curl guide
-├── app/
-│   ├── __init__.py
-│   ├── config.py        # Settings management via Pydantic
-│   ├── llm.py           # Unified Pydantic-AI agent with Groq + Gemini fallback
-│   └── main.py          # FastAPI app exposing /ping and /prompt
-└── tests/
-    ├── __init__.py
-    ├── test_llm.py      # LLM fallback logic and exception handling tests
-    └── test_api.py      # API endpoints and curl format compatibility tests
-```
+All 19 tests verify:
+- Groq primary success
+- Gemini 3.5 Flash 1st fallback
+- Gemini 3.5 Flash Lite 2nd fallback rescue
+- All 3 tiers failing simultaneously (502 error aggregation)
+- Dedicated `/qwen`, `/gemini-lite`, `/gemini`, `/gpt`, `/gemma` routing
+- Curl formats (x-www-form-urlencoded, raw binary, JSON, query params)
+- Empty body validation (400) and missing API key error responses

@@ -1,10 +1,9 @@
-"""Unified LLM interaction layer using Pydantic-AI with Groq primary and Gemini fallback."""
+"""Unified LLM interaction layer using Pydantic-AI with Groq primary and Gemini fallbacks."""
 
 import logging
 from typing import Any
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import FallbackExceptionGroup
-from pydantic_ai.models import Model
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.models.groq import GroqModel
@@ -16,49 +15,93 @@ from app.config import Settings, get_settings
 logger = logging.getLogger("unified_llm")
 
 
-def _should_fallback_to_gemini(exc: Exception) -> bool:
-    """Predicate called when the primary model (Groq) fails.
+def _should_fallback_to_next(exc: Exception) -> bool:
+    """Predicate called when a model fails in the fallback chain.
 
-    Logs a warning with the error details and returns True to trigger Gemini fallback.
+    Logs a warning with error details and returns True to advance to the next fallback model.
     """
-    logger.warning("Primary Groq API call failed (%s: %s). Falling back to Gemini API...", type(exc).__name__, exc)
+    logger.warning("Model call failed (%s: %s). Advancing to next fallback model...", type(exc).__name__, exc)
     return True
 
 
 class UnifiedLLM:
-    """Unified LLM interface managing Groq primary and Gemini fallback via Pydantic-AI."""
+    """Unified LLM interface managing multi-tier fallbacks and dedicated model routes."""
 
     def __init__(
         self,
         agent: Agent | None = None,
+        named_agents: dict[str, Agent] | None = None,
         settings: Settings | None = None,
     ):
         self._settings = settings or get_settings()
         self._custom_agent = agent
         self._agent: Agent | None = agent
+        self._named_agents: dict[str, Agent] = named_agents.copy() if named_agents else {}
 
-    def _build_agent(self) -> Agent:
-        """Constructs the Pydantic-AI agent according to available API credentials."""
+    def _get_groq_provider(self) -> GroqProvider:
+        key = self._settings.groq_api_key
+        if not key:
+            raise RuntimeError(
+                "GROQ_API_KEY is not configured. Please set GROQ_API_KEY in your .env file or environment."
+            )
+        return GroqProvider(api_key=key)
+
+    def _get_gemini_provider(self) -> GoogleProvider:
+        key = self._settings.effective_gemini_api_key
+        if not key:
+            raise RuntimeError(
+                "GEMINI_API_KEY (or GOOGLE_API_KEY) is not configured. "
+                "Please set GEMINI_API_KEY in your .env file or environment."
+            )
+        return GoogleProvider(api_key=key)
+
+    def _build_fallback_agent(self) -> Agent:
+        """Constructs the multi-tier agent for /prompt according to available credentials.
+
+        Tier 1: Groq API (e.g. llama-3.3-70b-versatile)
+        Tier 2 (Fallback 1): Gemini API (e.g. gemini-3.5-flash)
+        Tier 3 (Fallback 2): Gemini API (e.g. gemini-3.5-flash-lite)
+        """
         settings = self._settings
         groq_key = settings.groq_api_key
         gemini_key = settings.effective_gemini_api_key
 
         if groq_key and gemini_key:
             logger.info(
-                "Configuring FallbackModel: Groq ('%s') primary -> Gemini ('%s') fallback",
+                "Configuring 3-tier FallbackModel: Groq ('%s') -> Gemini ('%s') -> Gemini Lite ('%s')",
                 settings.groq_model,
                 settings.gemini_model,
+                settings.gemini_lite_model,
             )
             groq_provider = GroqProvider(api_key=groq_key)
             groq_model = GroqModel(settings.groq_model, provider=groq_provider)
 
             gemini_provider = GoogleProvider(api_key=gemini_key)
             gemini_model = GoogleModel(settings.gemini_model, provider=gemini_provider)
+            gemini_lite_model = GoogleModel(settings.gemini_lite_model, provider=gemini_provider)
 
             fallback_model = FallbackModel(
                 groq_model,
                 gemini_model,
-                fallback_on=_should_fallback_to_gemini,
+                gemini_lite_model,
+                fallback_on=_should_fallback_to_next,
+            )
+            return Agent(fallback_model, system_prompt=settings.system_prompt)
+
+        if gemini_key:
+            logger.info(
+                "Configuring 2-tier Gemini fallback: Gemini ('%s') -> Gemini Lite ('%s')",
+                settings.gemini_model,
+                settings.gemini_lite_model,
+            )
+            gemini_provider = GoogleProvider(api_key=gemini_key)
+            gemini_model = GoogleModel(settings.gemini_model, provider=gemini_provider)
+            gemini_lite_model = GoogleModel(settings.gemini_lite_model, provider=gemini_provider)
+
+            fallback_model = FallbackModel(
+                gemini_model,
+                gemini_lite_model,
+                fallback_on=_should_fallback_to_next,
             )
             return Agent(fallback_model, system_prompt=settings.system_prompt)
 
@@ -68,34 +111,59 @@ class UnifiedLLM:
             groq_model = GroqModel(settings.groq_model, provider=groq_provider)
             return Agent(groq_model, system_prompt=settings.system_prompt)
 
-        if gemini_key:
-            logger.info("Configuring single model: Gemini ('%s')", settings.gemini_model)
-            gemini_provider = GoogleProvider(api_key=gemini_key)
-            gemini_model = GoogleModel(settings.gemini_model, provider=gemini_provider)
-            return Agent(gemini_model, system_prompt=settings.system_prompt)
-
         raise RuntimeError(
             "No LLM API keys configured. Please set GROQ_API_KEY (for Groq primary) "
-            "and/or GEMINI_API_KEY (for Gemini fallback) in your .env file or environment."
+            "and/or GEMINI_API_KEY (for Gemini fallbacks) in your .env file or environment."
         )
 
     def get_agent(self) -> Agent:
-        """Retrieves or builds the active Pydantic-AI agent."""
+        """Retrieves or builds the active Pydantic-AI agent for /prompt."""
         if self._custom_agent is not None:
             return self._custom_agent
         if self._agent is None:
-            self._agent = self._build_agent()
+            self._agent = self._build_fallback_agent()
         return self._agent
 
-    async def generate(self, prompt: str) -> str:
-        """Passes the user prompt to the model (Groq first, fallback to Gemini).
+    def get_named_agent(self, name: str) -> Agent:
+        """Retrieves or builds a dedicated model agent by route identifier."""
+        if name in self._named_agents:
+            return self._named_agents[name]
 
-        Returns the response text string.
-        """
-        agent = self.get_agent()
+        settings = self._settings
+        agent: Agent
+
+        if name == "qwen":
+            # qwen/qwen3.8-27b (groq api)
+            provider = self._get_groq_provider()
+            agent = Agent(GroqModel(settings.qwen_model, provider=provider), system_prompt=settings.system_prompt)
+        elif name == "gpt":
+            # openai/gpt-oss-120b (groq api)
+            provider = self._get_groq_provider()
+            agent = Agent(GroqModel(settings.gpt_model, provider=provider), system_prompt=settings.system_prompt)
+        elif name == "gemini-lite":
+            # gemini-3.5-flash-lite (gemini api)
+            provider = self._get_gemini_provider()
+            agent = Agent(GoogleModel(settings.gemini_lite_model, provider=provider), system_prompt=settings.system_prompt)
+        elif name == "gemini":
+            # gemini-3.5-flash (gemini api)
+            provider = self._get_gemini_provider()
+            agent = Agent(GoogleModel(settings.gemini_model, provider=provider), system_prompt=settings.system_prompt)
+        elif name == "gemma":
+            # gemma-4-31b-it (gemini api)
+            provider = self._get_gemini_provider()
+            agent = Agent(GoogleModel(settings.gemma_model, provider=provider), system_prompt=settings.system_prompt)
+        elif name == "prompt":
+            agent = self.get_agent()
+        else:
+            raise ValueError(f"Unknown model route: {name}")
+
+        self._named_agents[name] = agent
+        return agent
+
+    async def _execute_agent(self, agent: Agent, prompt: str) -> str:
+        """Runs an agent and formats the output or error."""
         try:
             result = await agent.run(prompt)
-            # Log any fallback attempts recorded in response
             failed_attempts = getattr(result.response, "failed_attempts", None)
             if failed_attempts:
                 for attempt in failed_attempts:
@@ -107,8 +175,18 @@ class UnifiedLLM:
             return str(result.output)
         except FallbackExceptionGroup as e:
             err_details = "; ".join(f"{type(x).__name__}: {x}" for x in getattr(e, "exceptions", []))
-            logger.error("Both primary and fallback models failed: %s", err_details)
+            logger.error("All models in fallback chain failed: %s", err_details)
             raise RuntimeError(f"All LLM providers failed: {err_details}") from e
         except Exception as e:
             logger.error("LLM execution error: %s", e)
             raise
+
+    async def generate(self, prompt: str) -> str:
+        """Runs prompt through the 3-tier fallback chain (/prompt)."""
+        agent = self.get_agent()
+        return await self._execute_agent(agent, prompt)
+
+    async def generate_named(self, name: str, prompt: str) -> str:
+        """Runs prompt through a specific dedicated model agent."""
+        agent = self.get_named_agent(name)
+        return await self._execute_agent(agent, prompt)

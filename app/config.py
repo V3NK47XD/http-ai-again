@@ -22,7 +22,13 @@ class Settings(BaseSettings):
     # Gemini / Google settings (accepts GEMINI_API_KEY or GOOGLE_API_KEY)
     gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
     google_api_key: str | None = Field(default=None, alias="GOOGLE_API_KEY")
-    gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
+    gemini_model: str = Field(default="gemini-3.5-flash", alias="GEMINI_MODEL")
+    gemini_lite_model: str = Field(default="gemini-3.5-flash-lite", alias="GEMINI_LITE_MODEL")
+
+    # Dedicated model routes
+    qwen_model: str = Field(default="qwen/qwen3.8-27b", alias="QWEN_MODEL")
+    gpt_model: str = Field(default="openai/gpt-oss-120b", alias="GPT_MODEL")
+    gemma_model: str = Field(default="gemma-4-31b-it", alias="GEMMA_MODEL")
 
     # App server settings
     host: str = Field(default="0.0.0.0", alias="HOST")

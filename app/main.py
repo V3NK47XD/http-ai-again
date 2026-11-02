@@ -1,4 +1,4 @@
-"""FastAPI application exposing /ping and curl-friendly /prompt routes."""
+"""FastAPI application exposing /ping, /prompt (3-tier fallback), and dedicated model routes."""
 
 import json
 import logging
@@ -63,6 +63,44 @@ def extract_prompt_from_request(raw_bytes: bytes, query_params: dict) -> str:
     return ""
 
 
+async def _handle_model_request(request: Request, route_name: str | None = None) -> PlainTextResponse:
+    """Shared handler extracting prompt text, invoking the model runner, and formatting plain text response."""
+    body_bytes = await request.body()
+    query_dict = dict(request.query_params)
+    user_prompt = extract_prompt_from_request(body_bytes, query_dict)
+
+    if not user_prompt:
+        endpoint_path = request.url.path
+        return PlainTextResponse(
+            f"Error: Prompt body cannot be empty.\n"
+            f'Usage: curl -d "Your prompt here" http://localhost:8000{endpoint_path}\n',
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    llm: UnifiedLLM = getattr(request.app.state, "llm", None) or UnifiedLLM()
+
+    try:
+        if route_name:
+            response_text = await llm.generate_named(route_name, user_prompt)
+        else:
+            response_text = await llm.generate(user_prompt)
+
+        clean_response = response_text.rstrip("\n") + "\n"
+        return PlainTextResponse(clean_response, status_code=status.HTTP_200_OK)
+    except RuntimeError as e:
+        logger.error("LLM execution failure on '%s': %s", route_name or "prompt", e)
+        return PlainTextResponse(
+            f"Error: {e}\n",
+            status_code=status.HTTP_502_BAD_GATEWAY,
+        )
+    except Exception as e:
+        logger.exception("Unexpected error handling '%s': %s", route_name or "prompt", e)
+        return PlainTextResponse(
+            f"Internal Error: {e}\n",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle manager ensuring UnifiedLLM instance is available on app.state."""
@@ -72,8 +110,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Pydantic-AI Groq & Gemini Service",
-    description="Unified API with Groq primary and Gemini fallback via Pydantic-AI",
+    title="Pydantic-AI Multi-Model Service",
+    description="Unified API with Groq primary, Gemini fallbacks, and dedicated model endpoints",
     lifespan=lifespan,
 )
 
@@ -86,36 +124,35 @@ async def ping() -> PlainTextResponse:
 
 @app.api_route("/prompt", methods=["POST", "GET"], response_class=PlainTextResponse)
 async def prompt(request: Request) -> PlainTextResponse:
-    """Prompt endpoint accepting text body without headers or auth.
+    """Prompt endpoint with 3-tier fallback: Groq -> Gemini 3.5 Flash -> Gemini 3.5 Flash Lite."""
+    return await _handle_model_request(request, route_name=None)
 
-    Executes Groq API first, with automatic Gemini fallback on failure.
-    """
-    body_bytes = await request.body()
-    query_dict = dict(request.query_params)
-    user_prompt = extract_prompt_from_request(body_bytes, query_dict)
 
-    if not user_prompt:
-        return PlainTextResponse(
-            "Error: Prompt body cannot be empty.\n"
-            "Usage: curl -d \"Your prompt here\" http://localhost:8000/prompt\n",
-            status_code=status.HTTP_400_BAD_REQUEST,
-        )
+@app.api_route("/qwen", methods=["POST", "GET"], response_class=PlainTextResponse)
+async def qwen(request: Request) -> PlainTextResponse:
+    """Dedicated endpoint for qwen/qwen3.8-27b (Groq API)."""
+    return await _handle_model_request(request, route_name="qwen")
 
-    llm: UnifiedLLM = getattr(request.app.state, "llm", None) or UnifiedLLM()
 
-    try:
-        response_text = await llm.generate(user_prompt)
-        clean_response = response_text.rstrip("\n") + "\n"
-        return PlainTextResponse(clean_response, status_code=status.HTTP_200_OK)
-    except RuntimeError as e:
-        logger.error("LLM execution failure: %s", e)
-        return PlainTextResponse(
-            f"Error: {e}\n",
-            status_code=status.HTTP_502_BAD_GATEWAY,
-        )
-    except Exception as e:
-        logger.exception("Unexpected error handling prompt: %s", e)
-        return PlainTextResponse(
-            f"Internal Error: {e}\n",
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+@app.api_route("/gemini-lite", methods=["POST", "GET"], response_class=PlainTextResponse)
+async def gemini_lite(request: Request) -> PlainTextResponse:
+    """Dedicated endpoint for gemini-3.5-flash-lite (Gemini API)."""
+    return await _handle_model_request(request, route_name="gemini-lite")
+
+
+@app.api_route("/gemini", methods=["POST", "GET"], response_class=PlainTextResponse)
+async def gemini(request: Request) -> PlainTextResponse:
+    """Dedicated endpoint for gemini-3.5-flash (Gemini API)."""
+    return await _handle_model_request(request, route_name="gemini")
+
+
+@app.api_route("/gpt", methods=["POST", "GET"], response_class=PlainTextResponse)
+async def gpt(request: Request) -> PlainTextResponse:
+    """Dedicated endpoint for openai/gpt-oss-120b (Groq API)."""
+    return await _handle_model_request(request, route_name="gpt")
+
+
+@app.api_route("/gemma", methods=["POST", "GET"], response_class=PlainTextResponse)
+async def gemma(request: Request) -> PlainTextResponse:
+    """Dedicated endpoint for gemma-4-31b-it (Gemini API)."""
+    return await _handle_model_request(request, route_name="gemma")
