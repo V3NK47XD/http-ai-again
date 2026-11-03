@@ -37,6 +37,10 @@ class Settings(BaseSettings):
         default="You are a helpful and concise AI assistant.",
         alias="SYSTEM_PROMPT",
     )
+    files_dir: Path = Field(
+        default_factory=lambda: Path(__file__).resolve().parent.parent / "files",
+        alias="FILES_DIR",
+    )
 
     @property
     def effective_gemini_api_key(self) -> str | None:

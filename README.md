@@ -11,6 +11,7 @@ It features an automatic **3-tier fallback chain** on `/prompt`, plus dedicated 
 | Endpoint | Provider | Model | Description |
 |---|---|---|---|
 | `/ping` | Internal | N/A | Health check; returns `pong\n` |
+| `/files` | Internal | N/A | File explorer UI; renders HTML listing all files in `files/` folder and opens them on click |
 | `/prompt` | Groq $\rightarrow$ Gemini $\rightarrow$ Gemini Lite | `llama-3.3-70b-versatile` $\rightarrow$ `gemini-3.5-flash` $\rightarrow$ `gemini-3.5-flash-lite` | **3-tier fallback**: Groq primary, Gemini Flash 1st fallback, Gemini Flash Lite 2nd fallback |
 | `/qwen` | Groq API | `qwen/qwen3.8-27b` | Dedicated Qwen 3.8 27B model |
 | `/gemini-lite` | Gemini API | `gemini-3.5-flash-lite` | Dedicated Gemini 3.5 Flash Lite model |
@@ -168,6 +169,20 @@ curl --data-binary "Compare Python and Rust in 3 bullet points." http://localhos
 # From file
 curl --data-binary @prompt.txt http://localhost:8000/prompt
 ```
+
+---
+
+### 5. File Explorer (`/files`)
+
+Navigate in your browser to view all files located in the `files/` directory:
+
+```
+http://localhost:8000/files
+```
+
+- Renders an HTML page displaying all files (including size, modified date, and icon).
+- Clicking any file or its "Open" button opens the file directly in the browser or a new tab.
+- Supports nested subdirectories and safe path resolution preventing traversal.
 
 ---
 

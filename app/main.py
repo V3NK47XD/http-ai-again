@@ -4,11 +4,12 @@ import json
 import logging
 import urllib.parse
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, status
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 
 from app.config import get_settings
 from app.llm import UnifiedLLM
+from app.files import get_files_directory, list_files_in_directory, render_files_html
 
 logging.basicConfig(
     level=logging.INFO,
@@ -156,3 +157,29 @@ async def gpt(request: Request) -> PlainTextResponse:
 async def gemma(request: Request) -> PlainTextResponse:
     """Dedicated endpoint for gemma-4-31b-it (Gemini API)."""
     return await _handle_model_request(request, route_name="gemma")
+
+
+@app.get("/files", response_class=HTMLResponse)
+@app.get("/files/", response_class=HTMLResponse)
+async def list_files_page() -> HTMLResponse:
+    """Renders an HTML page showing all files in the files folder."""
+    files_dir = get_files_directory()
+    files = list_files_in_directory(files_dir)
+    html_content = render_files_html(files)
+    return HTMLResponse(content=html_content)
+
+
+@app.get("/files/{filepath:path}")
+async def open_file(filepath: str) -> FileResponse:
+    """Opens/serves a file from the files folder."""
+    files_dir = get_files_directory()
+    target_path = (files_dir / filepath).resolve()
+
+    if not target_path.is_relative_to(files_dir) or not target_path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+
+    return FileResponse(
+        target_path,
+        filename=target_path.name,
+        content_disposition_type="inline",
+    )
